@@ -83,9 +83,13 @@ def tranform_to_dataframe(documents):
     # first to dataframe
     df = pd.DataFrame(documents)
     # second do the data conversions
-    df['amountInCents'] = np.floor(df['amountInCents']).fillna(0).astype('Int32')
-    df['noOfItems'] = np.floor(df['noOfItems']).fillna(0).astype('Int32')
-    
+    df['amountInCents'] = np.floor(df['amountInCents']).fillna(pd.NA).astype('Int32')
+    df['noOfItems'] = np.floor(df['noOfItems']).fillna(pd.NA).astype('Int32')
+
+    # fill paymentLinkExpireAt and paymentLink with unknown if it is NaT
+    df['paymentLinkExpireAt'] = df['paymentLinkExpireAt'].fillna("unknown")
+    df['paymentLink'] = df['paymentLink'].fillna("unknown")
+
     # third rename columns to snake_case
     df.rename(columns=COLUMN_MAPPING, inplace=True)
     return df
@@ -101,7 +105,6 @@ def save_to_csv(df, mode="w", header=True):
         raise
 
 def full_load(collection):
-    
     logger.info("Starting full load process")
     documents = fetch_all_documents(collection)
     
@@ -114,7 +117,6 @@ def full_load(collection):
     logger.info("Full data load completed successfully")
     
 def incremental_load(collection):
-    
     logger.info("Starting incremental load process")
     new_documents = fetch_incremental_documents(collection)
 
@@ -127,7 +129,6 @@ def incremental_load(collection):
     logger.info("Incremental data load completed successfully")
     
 def etl_process():
-    
     logger.info("Starting ETL process")
     client, collection = connect_to_mongodb()
     try:
