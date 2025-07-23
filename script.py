@@ -7,11 +7,16 @@ import pandas as pd
 import datetime
 from dateutil.parser import parse
 
-# Configuration
+# Configuration for soucre1: for reading the data from MongoDB
 SOURCE_URI = os.getenv("SOURCE_URI")
 SOURCE_DB = os.getenv("SOURCE_DB")
 TARGET_COLLECTION = os.getenv("TARGET_COLLECTION")
 OUTPUT_FILE = "payment_orders.csv"
+
+# configuration for source2: for writing the updates of the latest processed timestamp
+SOURCE_URI2 = os.getenv("SOURCE_URI2")
+SOURCE_DB2 = os.getenv("SOURCE_DB2")
+TARGET_COLLECTION2 = os.getenv("TARGET_COLLECTION2")
 
 # logger setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -51,8 +56,12 @@ def connect_to_mongodb():
         client = MongoClient(SOURCE_URI)
         source_db = client[SOURCE_DB]
         collection = source_db[TARGET_COLLECTION]
+        
+        client2 = MongoClient(SOURCE_URI2)
+        source_db2 = client2[SOURCE_DB2]
+        collection2 = source_db2[TARGET_COLLECTION2]
         logger.info("Successfully connected to MongoDB")
-        return client, collection
+        return client, collection, client2, collection2
     except PyMongoError as e:
         logger.error("Could not connect to mongoDB. Connection Failed!")
         raise
@@ -65,6 +74,30 @@ def metadata_check(mode, latest_time_processed): #writing logs to a file about t
         with open("last_processed_timestamp.txt", "r") as f:
             return parse(f.read())
 
+def metadata_check_mongodb(mode, latest_time_processed, collection2):
+    if mode == "w":
+        try:
+            collection2.update_one(
+                {"_id": "latest_timestamp"},
+                {"$set": {"timestamp": latest_time_processed}},
+                upsert=True
+            )
+            logger.info("Updated latest processed timestamp in MongoDB")
+        except PyMongoError as e:
+            logger.error(f"Error updating timestamp in MongoDB: {e}")
+            raise
+    elif mode == "r":
+        try:
+            doc = collection2.find_one({"_id": "latest_timestamp"})
+            if doc and "timestamp" in doc:
+                return doc["timestamp"]
+            else:
+                logger.warning("No timestamp found in MongoDB, returning default value")
+                return datetime.datetime.min
+        except PyMongoError as e:
+            logger.error(f"Error fetching timestamp from MongoDB: {e}")
+            raise
+    
 
 # def fetch_all_documents(collection):
 #     try:
@@ -125,9 +158,10 @@ def save_to_csv(df, mode="w", header=True):
 #     save_to_csv(df, mode='w', header=True)
 #     logger.info("Full data load completed successfully")
     
-def incremental_load(collection):
+def incremental_load(collection, collection2):
     logger.info("Starting incremental load process")
-    latest_time_processed = metadata_check("r", None)
+    #latest_time_processed = metadata_check("r", None)
+    latest_time_processed = metadata_check_mongodb("r", None, collection2)
     print(f"Last processed timestamp: {latest_time_processed}")
     new_documents = fetch_incremental_documents(collection, latest_time_processed)
 
@@ -139,28 +173,31 @@ def incremental_load(collection):
     save_to_csv(df, mode='a', header=False)
     if df is not None and not df.empty:
         latest_time_processed = df['created_at'].max()
-        metadata_check("w", latest_time_processed)
+        #metadata_check("w", latest_time_processed)
+        metadata_check_mongodb("w", latest_time_processed, collection2)
         logger.info(f"Updated last processed timestamp to {latest_time_processed}")
+        
     logger.info("Incremental data load completed successfully")
     
 def etl_process():
     logger.info("Starting ETL process")
-    client, collection = connect_to_mongodb()
+    client, collection, client2, collection2 = connect_to_mongodb()
+    
     try:
         # Perform full load
         #full_load(collection)
         
         # Perform incremental load
-        incremental_load(collection)
+        incremental_load(collection, collection2)
     except Exception as e:
         logger.error(f"ETL process failed: {e}")
         raise
         
     finally:
-        if client:
+        if client and client2:
             client.close()
-            logger.info("MongoDB connection closed")
-    
+            client2.close()
+            logger.info("MongoDB connections closed")
 
 if __name__ == "__main__":
     etl_process()
