@@ -18,7 +18,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 #constants
-latest_time_processed = None
 
 # Field projection for MongoDB queries
 FIELD_PROJECTION = {
@@ -57,27 +56,26 @@ def connect_to_mongodb():
     except PyMongoError as e:
         logger.error("Could not connect to mongoDB. Connection Failed!")
         raise
-    
-def metadata_check(collection): #writing logs to a file about the time the data was last processed
-    # check the last processed timestamp from the
-    
-    # writing the latest time processed to a file
-    with open("last_processed_timestamp.txt", "a") as f:
-        f.write(latest_time_processed.isoformat())
-        
-    logger.info(f"Metadata check completed. Last processed timestamp: {latest_time_processed}")
+
+def metadata_check(mode, latest_time_processed): #writing logs to a file about the time the data was last processed
+    if mode == "w":
+        with open("last_processed_timestamp.txt", "w") as f:
+            f.write(latest_time_processed.isoformat())
+    elif mode == "r":
+        with open("last_processed_timestamp.txt", "r") as f:
+            return parse(f.read())
 
 
-def fetch_all_documents(collection):
-    try:
-        documents = list(collection.find({},FIELD_PROJECTION))
-        logger.info(f"Fetched {len(documents)} documents from MongoDB")
-        return documents
-    except PyMongoError as e: 
-        logger.error(f"Error fetching documents: {e}")
-        raise
+# def fetch_all_documents(collection):
+#     try:
+#         documents = list(collection.find({},FIELD_PROJECTION))
+#         logger.info(f"Fetched {len(documents)} documents from MongoDB")
+#         return documents
+#     except PyMongoError as e: 
+#         logger.error(f"Error fetching documents: {e}")
+#         raise
 
-def fetch_incremental_documents(collection):
+def fetch_incremental_documents(collection, latest_time_processed):
     try:
         query = {"createdAt": {"$gt": latest_time_processed}}
         documents = list(collection.find(query, FIELD_PROJECTION))
@@ -98,7 +96,6 @@ def tranform_to_dataframe(documents):
     df['amountInCents'] = np.floor(df['amountInCents']).fillna(pd.NA).astype('Int32')
     df['noOfItems'] = np.floor(df['noOfItems']).fillna(pd.NA).astype('Int32')
 
-    # fill paymentLinkExpireAt and paymentLink with unknown if it is NaT
     df['paymentLinkExpireAt'] = df['paymentLinkExpireAt'].fillna("unknown")
     df['paymentLink'] = df['paymentLink'].fillna("unknown")
 
@@ -116,22 +113,23 @@ def save_to_csv(df, mode="w", header=True):
         logger.error(f"Error saving to CSV: {e}")
         raise
 
-def full_load(collection):
-    logger.info("Starting full load process")
-    documents = fetch_all_documents(collection)
+# def full_load(collection):
+#     logger.info("Starting full load process")
+#     documents = fetch_all_documents(collection)
     
-    if not documents:
-        logger.info("No documents found for full load")
-        return
+#     if not documents:
+#         logger.info("No documents found for full load")
+#         return
     
-    df = tranform_to_dataframe(documents)
-    save_to_csv(df, mode='w', header=True)
-    logger.info("Full data load completed successfully")
+#     df = tranform_to_dataframe(documents)
+#     save_to_csv(df, mode='w', header=True)
+#     logger.info("Full data load completed successfully")
     
 def incremental_load(collection):
     logger.info("Starting incremental load process")
-    metadata_check(collection)
-    new_documents = fetch_incremental_documents(collection)
+    latest_time_processed = metadata_check("r", None)
+    print(f"Last processed timestamp: {latest_time_processed}")
+    new_documents = fetch_incremental_documents(collection, latest_time_processed)
 
     if not new_documents:
         logger.info("No new documents found for incremental load")
@@ -139,6 +137,10 @@ def incremental_load(collection):
     
     df = tranform_to_dataframe(new_documents)
     save_to_csv(df, mode='a', header=False)
+    if df is not None and not df.empty:
+        latest_time_processed = df['created_at'].max()
+        metadata_check("w", latest_time_processed)
+        logger.info(f"Updated last processed timestamp to {latest_time_processed}")
     logger.info("Incremental data load completed successfully")
     
 def etl_process():
@@ -146,7 +148,7 @@ def etl_process():
     client, collection = connect_to_mongodb()
     try:
         # Perform full load
-        full_load(collection)
+        #full_load(collection)
         
         # Perform incremental load
         incremental_load(collection)
