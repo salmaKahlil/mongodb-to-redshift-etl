@@ -4,6 +4,7 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 import numpy as np
 import pandas as pd
+import datetime
 from dateutil.parser import parse
 
 # Configuration
@@ -17,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 #constants
-LAST_PROCESSED_TIMESTAMP = parse("2025-07-01T22:15:00.281+00:00")
+latest_time_processed = None
 
 # Field projection for MongoDB queries
 FIELD_PROJECTION = {
@@ -56,18 +57,29 @@ def connect_to_mongodb():
     except PyMongoError as e:
         logger.error("Could not connect to mongoDB. Connection Failed!")
         raise
+    
+def metadata_check(collection): #writing logs to a file about the time the data was last processed
+    # check the last processed timestamp from the
+    
+    # writing the latest time processed to a file
+    with open("last_processed_timestamp.txt", "a") as f:
+        f.write(latest_time_processed.isoformat())
+        
+    logger.info(f"Metadata check completed. Last processed timestamp: {latest_time_processed}")
+
+
 def fetch_all_documents(collection):
     try:
-        query = {"createdAt": {"$lt": LAST_PROCESSED_TIMESTAMP}}
-        documents = list(collection.find(query,FIELD_PROJECTION))
+        documents = list(collection.find({},FIELD_PROJECTION))
         logger.info(f"Fetched {len(documents)} documents from MongoDB")
         return documents
     except PyMongoError as e: 
         logger.error(f"Error fetching documents: {e}")
         raise
+
 def fetch_incremental_documents(collection):
     try:
-        query = {"createdAt": {"$gt": LAST_PROCESSED_TIMESTAMP}}
+        query = {"createdAt": {"$gt": latest_time_processed}}
         documents = list(collection.find(query, FIELD_PROJECTION))
         logger.info(f"Fetched {len(documents)} documents incrementally from MongoDB")
         return documents
@@ -118,6 +130,7 @@ def full_load(collection):
     
 def incremental_load(collection):
     logger.info("Starting incremental load process")
+    metadata_check(collection)
     new_documents = fetch_incremental_documents(collection)
 
     if not new_documents:
