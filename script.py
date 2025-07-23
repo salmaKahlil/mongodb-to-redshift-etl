@@ -170,7 +170,8 @@ def incremental_load(collection, collection2):
         return
     
     df = tranform_to_dataframe(new_documents)
-    save_to_csv(df, mode='a', header=False)
+    file_exists = os.path.isfile(OUTPUT_FILE)
+    save_to_csv(df, mode='a', header=not file_exists)
     if df is not None and not df.empty:
         latest_time_processed = df['created_at'].max()
         #metadata_check("w", latest_time_processed)
