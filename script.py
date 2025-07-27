@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import datetime
 from dateutil.parser import parse
+import psycopg2
 
 # Configuration for soucre1: for reading the data from MongoDB
 SOURCE_URI = os.getenv("SOURCE_URI")
@@ -22,7 +23,13 @@ TARGET_COLLECTION2 = os.getenv("TARGET_COLLECTION2")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-#constants
+# redshift connection parameters
+REDSHIFT_HOST = os.getenv("REDSHIFT_HOST")
+REDSHIFT_PORT = os.getenv("REDSHIFT_PORT")
+REDSHIFT_DB = os.getenv("REDSHIFT_DB")
+REDSHIFT_USER = os.getenv("REDSHIFT_USER")
+REDSHIFT_PASSWORD = os.getenv("REDSHIFT_PASSWORD")
+
 
 # Field projection for MongoDB queries
 FIELD_PROJECTION = {
@@ -49,6 +56,16 @@ COLUMN_MAPPING = {
     'paymentLink': 'payment_link',
     'paymentLinkExpireAt': 'payment_link_expire_at'
 }
+
+conn = psycopg2.connect(
+    host=REDSHIFT_HOST,
+    port=REDSHIFT_PORT,
+    database=REDSHIFT_DB,
+    user=REDSHIFT_USER,
+    password=REDSHIFT_PASSWORD
+)
+
+cursor = conn.cursor()
 
 
 def connect_to_mongodb():
@@ -123,19 +140,50 @@ def tranform_to_dataframe(documents):
     if documents is None or len(documents) == 0:
         logger.warning("No data to transform/process")
         return
+    
     # first to dataframe
     df = pd.DataFrame(documents)
+    
     # second do the data conversions
-    df['amountInCents'] = np.floor(df['amountInCents']).fillna(pd.NA).astype('Int32')
-    df['noOfItems'] = np.floor(df['noOfItems']).fillna(pd.NA).astype('Int32')
-
-    df['paymentLinkExpireAt'] = df['paymentLinkExpireAt'].fillna("unknown")
-    df['paymentLink'] = df['paymentLink'].fillna("unknown")
-
+    df['_id'] = df['_id'].astype(str)
+    
+    df['amountInCents'] = np.floor(df['amountInCents']).fillna(0).astype('Int32')
+    df['noOfItems'] = np.floor(df['noOfItems']).fillna(0).astype('Int32')
+    
+    # Handle datetime columns properly
+    if 'paymentLinkExpireAt' in df.columns:
+        # Convert NaT to None for PostgreSQL compatibility
+        df['paymentLinkExpireAt'] = df['paymentLinkExpireAt'].apply(
+            lambda x: None if pd.isna(x) or pd.isnull(x) else x
+        )
+    
+    if 'paymentLink' in df.columns:
+        df['paymentLink'] = df['paymentLink'].fillna("unknown")
+    
+    # Handle createdAt datetime column
+    if 'createdAt' in df.columns:
+        df['createdAt'] = df['createdAt'].apply(
+            lambda x: None if pd.isna(x) or pd.isnull(x) else x
+        )
+    
+    # Replace all remaining NaT, NaN, and pd.NaT with None
+    df = df.replace({pd.NaT: None, np.nan: None})
+    
     # third rename columns to snake_case
     df.rename(columns=COLUMN_MAPPING, inplace=True)
     return df
 
+def clean_dataframe_for_db(df):
+
+    # Replace NaT and NaN with None
+    df = df.replace({pd.NaT: None, np.nan: None})
+    
+    # Additional check for string representations of NaT
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].apply(lambda x: None if str(x) == 'NaT' else x)
+    
+    return df
 def save_to_csv(df, mode="w", header=True):
     try:
         df.to_csv(OUTPUT_FILE, mode=mode, header=header, index=False)
@@ -145,7 +193,31 @@ def save_to_csv(df, mode="w", header=True):
     except Exception as e:
         logger.error(f"Error saving to CSV: {e}")
         raise
-
+    
+def save_to_redshift(df):
+    
+    df_clean = clean_dataframe_for_db(df.copy())
+    try:
+        for _, row in df.iterrows():
+            cursor.execute(
+                """
+                INSERT INTO interns.payment_orders (
+                    _id, provider, items_type, amount_in_cents, status,
+                    created_at, payment_link, payment_link_expire_at, no_of_items
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    row['_id'], row['provider'], row['items_type'], row['amount_in_cents'],
+                    row['status'], row['created_at'], row['payment_link'],
+                    row['payment_link_expire_at'], row['no_of_items']
+                )
+            )
+        conn.commit()
+        logger.info("Data saved to Redshift successfully")
+    except Exception as e:
+        logger.error(f"Error saving to Redshift: {e}")
+        raise
+    
 # def full_load(collection):
 #     logger.info("Starting full load process")
 #     documents = fetch_all_documents(collection)
@@ -170,8 +242,10 @@ def incremental_load(collection, collection2):
         return
     
     df = tranform_to_dataframe(new_documents)
-    file_exists = os.path.isfile(OUTPUT_FILE)
-    save_to_csv(df, mode='a', header=not file_exists)
+    #file_exists = os.path.isfile(OUTPUT_FILE)
+    #save_to_csv(df, mode='a', header=not file_exists)
+    print(df.info())
+    save_to_redshift(df)
     if df is not None and not df.empty:
         latest_time_processed = df['created_at'].max()
         #metadata_check("w", latest_time_processed)
