@@ -67,8 +67,7 @@ conn = psycopg2.connect(
 
 cursor = conn.cursor()
 
-
-def connect_to_mongodb():
+def extract_mongodb_connections():
     try:
         client = MongoClient(SOURCE_URI)
         source_db = client[SOURCE_DB]
@@ -83,49 +82,16 @@ def connect_to_mongodb():
         logger.error("Could not connect to mongoDB. Connection Failed!")
         raise
 
-def metadata_check(mode, latest_time_processed): #writing logs to a file about the time the data was last processed
-    if mode == "w":
-        with open("last_processed_timestamp.txt", "w") as f:
-            f.write(latest_time_processed.isoformat())
-    elif mode == "r":
-        with open("last_processed_timestamp.txt", "r") as f:
-            return parse(f.read())
+def extract_all_documents(collection):
+    try:
+        documents = list(collection.find({},FIELD_PROJECTION))
+        logger.info(f"Fetched {len(documents)} documents from MongoDB")
+        return documents
+    except PyMongoError as e: 
+        logger.error(f"Error fetching documents: {e}")
+        raise
 
-def metadata_check_mongodb(mode, latest_time_processed, collection2):
-    if mode == "w":
-        try:
-            collection2.update_one(
-                {"_id": "latest_timestamp"},
-                {"$set": {"timestamp": latest_time_processed}},
-                upsert=True
-            )
-            logger.info("Updated latest processed timestamp in MongoDB")
-        except PyMongoError as e:
-            logger.error(f"Error updating timestamp in MongoDB: {e}")
-            raise
-    elif mode == "r":
-        try:
-            doc = collection2.find_one({"_id": "latest_timestamp"})
-            if doc and "timestamp" in doc:
-                return doc["timestamp"]
-            else:
-                logger.warning("No timestamp found in MongoDB, returning default value")
-                return datetime.datetime.min
-        except PyMongoError as e:
-            logger.error(f"Error fetching timestamp from MongoDB: {e}")
-            raise
-    
-
-# def fetch_all_documents(collection):
-#     try:
-#         documents = list(collection.find({},FIELD_PROJECTION))
-#         logger.info(f"Fetched {len(documents)} documents from MongoDB")
-#         return documents
-#     except PyMongoError as e: 
-#         logger.error(f"Error fetching documents: {e}")
-#         raise
-
-def fetch_incremental_documents(collection, latest_time_processed):
+def extract_incremental_documents(collection, latest_time_processed):
     try:
         query = {"createdAt": {"$gt": latest_time_processed}}
         documents = list(collection.find(query, FIELD_PROJECTION))
@@ -135,7 +101,7 @@ def fetch_incremental_documents(collection, latest_time_processed):
         logger.error(f"Error fetching incremental documents: {e}")
         raise
 
-def tranform_to_dataframe(documents):
+def transform_documents_to_dataframe(documents):
     logger.info("Transforming documents is starting")
     if documents is None or len(documents) == 0:
         logger.warning("No data to transform/process")
@@ -143,48 +109,29 @@ def tranform_to_dataframe(documents):
     
     # first to dataframe
     df = pd.DataFrame(documents)
-    
-    # second do the data conversions
+
+    # # second do the data conversions
     df['_id'] = df['_id'].astype(str)
     
     df['amountInCents'] = np.floor(df['amountInCents']).fillna(0).astype('Int32')
     df['noOfItems'] = np.floor(df['noOfItems']).fillna(0).astype('Int32')
     
-    # Handle datetime columns properly
-    if 'paymentLinkExpireAt' in df.columns:
-        # Convert NaT to None for PostgreSQL compatibility
-        df['paymentLinkExpireAt'] = df['paymentLinkExpireAt'].apply(
-            lambda x: None if pd.isna(x) or pd.isnull(x) else x
-        )
     
     if 'paymentLink' in df.columns:
         df['paymentLink'] = df['paymentLink'].fillna("unknown")
     
-    # Handle createdAt datetime column
-    if 'createdAt' in df.columns:
-        df['createdAt'] = df['createdAt'].apply(
-            lambda x: None if pd.isna(x) or pd.isnull(x) else x
-        )
-    
-    # Replace all remaining NaT, NaN, and pd.NaT with None
-    df = df.replace({pd.NaT: None, np.nan: None})
-    
-    # third rename columns to snake_case
+    # third deal with datetime fields
+    transform_datetime_column(df, 'createdAt')
+    transform_datetime_column(df, 'paymentLinkExpireAt')
+    # # third rename columns to snake_case
     df.rename(columns=COLUMN_MAPPING, inplace=True)
     return df
 
-def clean_dataframe_for_db(df):
+def transform_datetime_column(df, col):
+    if col in df.columns:
+        df[col] = df[col].astype(object).where(pd.notnull(df[col]), None)
 
-    # Replace NaT and NaN with None
-    df = df.replace({pd.NaT: None, np.nan: None})
-    
-    # Additional check for string representations of NaT
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            df[col] = df[col].apply(lambda x: None if str(x) == 'NaT' else x)
-    
-    return df
-def save_to_csv(df, mode="w", header=True):
+def load_dataframe_to_csv(df, mode="w", header=True):
     try:
         df.to_csv(OUTPUT_FILE, mode=mode, header=header, index=False)
         action = "exported" if mode == 'w' else "appended"
@@ -194,9 +141,9 @@ def save_to_csv(df, mode="w", header=True):
         logger.error(f"Error saving to CSV: {e}")
         raise
     
-def save_to_redshift(df):
+def load_dataframe_to_redshift(df):
     
-    df_clean = clean_dataframe_for_db(df.copy())
+    #df_clean = clean_dataframe_for_db(df)
     try:
         for _, row in df.iterrows():
             cursor.execute(
@@ -217,53 +164,74 @@ def save_to_redshift(df):
     except Exception as e:
         logger.error(f"Error saving to Redshift: {e}")
         raise
-    
-# def full_load(collection):
-#     logger.info("Starting full load process")
-#     documents = fetch_all_documents(collection)
-    
-#     if not documents:
-#         logger.info("No documents found for full load")
-#         return
-    
-#     df = tranform_to_dataframe(documents)
-#     save_to_csv(df, mode='w', header=True)
-#     logger.info("Full data load completed successfully")
-    
-def incremental_load(collection, collection2):
-    logger.info("Starting incremental load process")
-    #latest_time_processed = metadata_check("r", None)
-    latest_time_processed = metadata_check_mongodb("r", None, collection2)
-    print(f"Last processed timestamp: {latest_time_processed}")
-    new_documents = fetch_incremental_documents(collection, latest_time_processed)
+
+def extract_last_processed_timestamp():
+    with open("last_processed_timestamp.txt", "r") as f:
+        return parse(f.read())
+
+def load_last_processed_timestamp(latest_time_processed):
+    with open("last_processed_timestamp.txt", "w") as f:
+        f.write(latest_time_processed.isoformat())
+
+def extract_timestamp_from_mongodb(collection2):
+    try:
+        doc = collection2.find_one({"_id": "latest_timestamp"})
+        if doc and "timestamp" in doc:
+            return doc["timestamp"]
+        else:
+            logger.warning("No timestamp found in MongoDB, returning default value")
+            return datetime.datetime.min
+    except PyMongoError as e:
+        logger.error(f"Error fetching timestamp from MongoDB: {e}")
+        raise
+
+def load_timestamp_to_mongodb(latest_time_processed, collection2):
+    try:
+        collection2.update_one(
+            {"_id": "latest_timestamp"},
+            {"$set": {"timestamp": latest_time_processed}},
+            upsert=True
+        )
+        logger.info("Updated latest processed timestamp in MongoDB")
+    except PyMongoError as e:
+        logger.error(f"Error updating timestamp in MongoDB: {e}")
+        raise
+
+def etl_process(collection, collection2):
+    logger.info("Starting ETL process")
+    #latest_time_processed = extract_last_processed_timestamp()
+    latest_time_processed = extract_timestamp_from_mongodb(collection2)
+    #print(f"Last processed timestamp: {latest_time_processed}")
+    new_documents = extract_incremental_documents(collection, latest_time_processed)
 
     if not new_documents:
         logger.info("No new documents found for incremental load")
         return
     
-    df = tranform_to_dataframe(new_documents)
+    df = transform_documents_to_dataframe(new_documents)
     #file_exists = os.path.isfile(OUTPUT_FILE)
-    #save_to_csv(df, mode='a', header=not file_exists)
-    print(df.info())
-    save_to_redshift(df)
+    #load_dataframe_to_csv(df, mode='a', header=not file_exists)
+    #print(df.info())
+    
+    load_dataframe_to_redshift(df)
     if df is not None and not df.empty:
         latest_time_processed = df['created_at'].max()
-        #metadata_check("w", latest_time_processed)
-        metadata_check_mongodb("w", latest_time_processed, collection2)
+        #load_last_processed_timestamp(latest_time_processed)
+        load_timestamp_to_mongodb(latest_time_processed, collection2)
         logger.info(f"Updated last processed timestamp to {latest_time_processed}")
         
-    logger.info("Incremental data load completed successfully")
+    logger.info("ETL process completed successfully")
     
-def etl_process():
+def main():
     logger.info("Starting ETL process")
-    client, collection, client2, collection2 = connect_to_mongodb()
+    client, collection, client2, collection2 = extract_mongodb_connections()
     
     try:
         # Perform full load
         #full_load(collection)
         
         # Perform incremental load
-        incremental_load(collection, collection2)
+        etl_process(collection, collection2)
     except Exception as e:
         logger.error(f"ETL process failed: {e}")
         raise
@@ -275,7 +243,7 @@ def etl_process():
             logger.info("MongoDB connections closed")
 
 if __name__ == "__main__":
-    etl_process()
+    main()
     logger.info("ETL process completed successfully")
     
     
