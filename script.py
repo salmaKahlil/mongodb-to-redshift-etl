@@ -63,6 +63,7 @@ redshift_connection = psycopg2.connect(
 )
 
 redshift_cursor = redshift_connection.cursor()
+table_name = "interns.payment_orders"
 
 def extract_mongodb_connections():
     try:
@@ -149,7 +150,7 @@ def load_dataframe_to_redshift(payment_orders_dataframe):
         for row_index, payment_order_row in payment_orders_dataframe.iterrows():
             redshift_cursor.execute(
                 """
-                INSERT INTO interns.payment_orders (
+                INSERT INTO table_name (
                     _id, provider, items_type, amount_in_cents, status,
                     created_at, payment_link, payment_link_expire_at, no_of_items
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
