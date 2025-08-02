@@ -155,7 +155,7 @@ def handle_datatype_conversion(dataframe, column_name, target_dtype):
     logger.info(f"Converting column '{column_name}' to {target_dtype}")
     if column_name in dataframe.columns:
         if target_dtype == 'Int32': 
-            dataframe[column_name] = np.floor(dataframe[column_name]).astype('Int64')
+            dataframe[column_name] = np.floor(dataframe[column_name]).astype('int32')
         elif target_dtype == str:
             dataframe[column_name] = dataframe[column_name].astype(str)
     
@@ -181,25 +181,25 @@ def transform_main(payment_order_documents, urls_documents):
     payment_orders_dataframe = pd.DataFrame(payment_order_documents)
     urls_dataframe = pd.DataFrame(urls_documents)
 
+    #filling missing values
+    # payment orders 
+    filling_missing_values(payment_orders_dataframe, 'amountInCents', 0)
+    filling_missing_values(payment_orders_dataframe, 'noOfItems', 0)
+    filling_missing_values(payment_orders_dataframe, 'totalPaidAmountInCents', 0)
+    filling_missing_values(payment_orders_dataframe, 'serviceFeesInCents', 0)
+    # urls
+    filling_missing_values(urls_dataframe, 'clicks', 0)
+    
     # second do the data conversions
     # payment orders conversions
     handle_datatype_conversion(payment_orders_dataframe, '_id', str)
     handle_datatype_conversion(payment_orders_dataframe, 'amountInCents', 'Int32')
     handle_datatype_conversion(payment_orders_dataframe, 'noOfItems', 'Int32')
-    #handle_datatype_conversion(payment_orders_dataframe, 'totalPaidAmountInCents', 'Int32')
+    handle_datatype_conversion(payment_orders_dataframe, 'totalPaidAmountInCents', 'Int32')
     handle_datatype_conversion(payment_orders_dataframe, 'serviceFeesInCents', 'Int32')
     #urls conversions
     handle_datatype_conversion(urls_dataframe, 'hash', str)  #urls 
     handle_datatype_conversion(urls_dataframe, 'clicks', 'Int32') # urls 
-    
-    #filling missing values
-    # payment orders 
-    filling_missing_values(payment_orders_dataframe, 'amountInCents', 0)
-    filling_missing_values(payment_orders_dataframe, 'noOfItems', 0)
-    #filling_missing_values(payment_orders_dataframe, 'totalPaidAmountInCents', 0)
-    filling_missing_values(payment_orders_dataframe, 'serviceFeesInCents', 0)
-    # urls
-    filling_missing_values(urls_dataframe, 'clicks', 0)
     
     # third deal with datetime fields
     handle_datetime_column(payment_orders_dataframe, 'createdAt')
@@ -356,10 +356,7 @@ def etl_process(payment_orders_collection, timestamp_tracking_collection, urls_c
     # transform
     payment_order_documents, urls_documents = transform_main(payment_order_documents, urls_documents)
     merged_dataframe = merge_dataframes(payment_order_documents, urls_documents)
-
-    #save merged dataframe to csv for debugging purposes
-    merged_dataframe.to_csv("merged_dataframe_debug.csv", index=False)
-
+    
     if merged_dataframe is None or merged_dataframe.empty:
         logger.warning("Merged DataFrame is empty, skipping timestamp update")
         return
